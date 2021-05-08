@@ -32,6 +32,7 @@ from sklearn.model_selection import cross_validate, cross_val_score, GridSearchC
 from sklearn.metrics import classification_report, confusion_matrix, plot_confusion_matrix, precision_recall_curve, average_precision_score, plot_precision_recall_curve
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.linear_model import LogisticRegression
 
 
 
@@ -128,7 +129,59 @@ X_ts_pp_m1 = pipe.transform(X_ts_m1)
 X = np.concatenate((X_tr_pp_m1, X_ts_pp_m1))
 y = np.concatenate((y_tr_m1, y_ts_m1))
 
+#resampling with SMOTE
+print('Original dataset shape {}'.format(Counter(y_m1)))
+smote = SMOTE(random_state= 42)
+X_res, y_res = smote.fit_resample(X_tr_pp_m1, y_tr_m1)
+print('Resampled dataset shape {}'.format(Counter(y_res)))
+from imblearn.pipeline import Pipeline
+
 #### MULTICLASS MODELING ####
+
+## Logistic Regression ##
+lr = LogisticRegression()
+lr.fit(X_tr_pp_m1, y_m1[ix_tr])
+y_lr_pred= lr.predict(X_ts_pp_m1)
+
+cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=42)
+scores_lr = cross_val_score(lr, X, y, scoring="roc_auc_ovo", cv=cv, n_jobs=1)
+print("roc_ovo lr: %.3f" % np.mean(scores_lr))
+savings = savings_investigation_score(y_m1[ix_ts], y_lr_pred)
+print("savings  lr: ")
+print(savings)
+
+print("Confusion matrix lr:")
+print(confusion_matrix(y_ts_m1, y_lr_pred))
+print("classification report lr")
+print(classification_report(y_ts_m1, y_lr_pred))
+
+# Parameter Tuning logistic regression with GridSearchCV
+param_grid = {'penalty': ['l1', 'l2', 'elasticnet', 'none'],
+              'solver': ['newton-cg', 'lbfgs', 'liblinear', 'sag', 'saga'],
+              'multi_class': ["ovr", "multinomial"]
+             }
+cv_model = GridSearchCV(estimator=lr, param_grid= param_grid, cv=5, scoring='roc_auc_ovo',  verbose= 2)
+cv_model.fit(X_tr_pp_m1, y_m1[ix_tr])
+print(cv_model.best_score_)
+print(cv_model.best_params_)
+
+# evaluation tuned model
+lr_tuned = LogisticRegression(multi_class='multinomial', penalty='l2', solver='newton-cg')
+lr_tuned.fit(X_tr_pp_m1, y_tr_m1)
+y_lr_respred = lr_tuned.predict(X_ts_pp_m1)
+
+pipeline_lr = Pipeline(steps= [('over', SMOTE()), ('LogisticRegression', lr_tuned)])
+cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=42)
+scores_lr = cross_val_score(pipeline_lr, X, y, scoring="roc_auc_ovo", cv=cv, n_jobs=1)
+print("roc_ovo tuned lr with SMOTE: %.3f" % np.mean(scores_lr))
+savings = savings_investigation_score(y_m1[ix_ts], y_lr_respred)
+print("savings tuned lr with SMOTE: ")
+print(savings)
+
+print("classification report tuned lr with SMOTE")
+print(classification_report(y_ts_m1, y_lr_respred))
+
+
 ## XGBoost ##
 Xgb = xgb.XGBClassifier(objective="multi:softmax", seed=42, num_class=3, reg_lambda=0)
 Xgb.fit(X_tr_pp_m1, y_m1[ix_tr], verbose=True, early_stopping_rounds=10, eval_metric='merror',
@@ -138,13 +191,13 @@ y_pred = Xgb.predict(X_ts_pp_m1)
 print('classification report XGBoost')
 print(classification_report(y_ts_m1, y_pred))
 cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=42)
-scores = cross_val_score(Xgb, X , y, scoring="roc_auc_ovo", cv=cv, n_jobs=1)
+scores = cross_val_score(Xgb, X, y, scoring="roc_auc_ovo", cv=cv, n_jobs=1)
 print("roc_ovo XGBoost: %.3f" % np.mean(scores))
 savings = savings_investigation_score(y_m1[ix_ts], y_pred)
 print("savings XGBoost: ")
 print(savings)
 
-'''# Parameter Tuning with GridSearchCV
+# Parameter Tuning with GridSearchCV
 param_grid = {'max_depth': [10, 15, 20],
               'gamma': [3, 4, 5],
               'subsample': [0.3, 0.5, 0.75],
@@ -153,16 +206,9 @@ param_grid = {'max_depth': [10, 15, 20],
 cv_model = GridSearchCV(estimator=Xgb, param_grid= param_grid, cv=5, scoring='roc_auc_ovo',  verbose= 2)
 cv_model.fit(X_tr_pp_m1, y_m1[ix_tr])
 print(cv_model.best_score_)
-print(cv_model.best_params_)'''
-
-#resampling with SMOTE
-print('Original dataset shape {}'.format(Counter(y_m1)))
-smote = SMOTE(random_state= 42)
-X_res, y_res = smote.fit_resample(X_tr_pp_m1, y_tr_m1)
-print('Resampled dataset shape {}'.format(Counter(y_res)))
+print(cv_model.best_params_)
 
 #constructing XGBoost model with tuned parameters & SMOTE
-from imblearn.pipeline import Pipeline
 Xgb_tuned = xgb.XGBClassifier(objective="multi:softmax", seed=42, num_class=3, reg_lambda=0, max_depth=15, gamma=4,
                               learning_rate=0.03, subsample=0.5)
 Xgb_tuned.fit(X_res,y_res, verbose=True, early_stopping_rounds=10, eval_metric='merror',
@@ -181,6 +227,8 @@ savings = savings_investigation_score(y_m1[ix_ts], y_Xgb_respred)
 print("savings Tuned XGBoost with SMOTE : ")
 print(savings)
 
+
+
 ## Multiclass Random Forrest ##
 rf = RandomForestClassifier(n_jobs=-1)
 rf.fit(X_tr_pp_m1, y_m1[ix_tr])
@@ -197,7 +245,7 @@ savings = savings_investigation_score(y_m1[ix_ts], y_rf_pred)
 print("savings Random Forest: ")
 print(savings)
 
-'''#Instantiate the grid search model
+#Instantiate the grid search model
 param_grid = {
               'criterion': ['entropy', 'gini'],
               'max_depth': [15, 10, 5],
@@ -209,7 +257,7 @@ grid_search = GridSearchCV(estimator=rf, param_grid=param_grid,
 
 grid_search.fit(X_tr_pp_m1, y_m1[ix_tr])
 print(grid_search.best_score_)
-print(grid_search.best_params_)'''
+print(grid_search.best_params_)
 
 # Random Forest Tuned with SMOTE
 rf_tuned = RandomForestClassifier(criterion= 'entropy', n_estimators= 250, max_depth= 10, n_jobs=-1)
@@ -228,6 +276,8 @@ savings = savings_investigation_score(y_m1[ix_ts], y_rf_respred)
 print("savings Tuned Random Forest with SMOTE: ")
 print(savings)
 
+
+
 ## Multiclass Decision Tree ##
 dt = DecisionTreeClassifier()
 dt.fit(X_tr_pp_m1, y_tr_m1)
@@ -244,7 +294,7 @@ savings = savings_investigation_score(y_ts_m1, y_dt_pred)
 print("savings DecisionTree: ")
 print(savings)
 
-'''#Initiate GridsearchCV
+#Initiate GridsearchCV
 param_grid_dt = {"max_depth": [1, 3, 5],
                  "criterion": ["entropy", "gini"],
                  "min_samples_split": [2, 3],
@@ -256,9 +306,7 @@ grid_search_dt = GridSearchCV(estimator=dt, param_grid=param_grid_dt,
 
 grid_search_dt.fit(X_tr_pp_m1, y_tr_m1)
 print(grid_search_dt.best_score_)
-print(grid_search_dt.best_params_)'''
-
-
+print(grid_search_dt.best_params_)
 
 # Tuned DecisionTree with SMOTE
 dt_tuned = DecisionTreeClassifier(criterion='gini', max_depth= 3, min_samples_split= 2)
@@ -277,6 +325,8 @@ savings = savings_investigation_score(y_ts_m1, y_dt_respred)
 print("savings Tuned DecisionTree with SMOTE: ")
 print(savings)
 
+
+
 ## Voting Classifier ##
 Vclf = VotingClassifier(estimators=[('decisionTree', dt_tuned), ('RandomForest', rf_tuned), ('XGBoost', Xgb_tuned)],
                         voting='soft')
@@ -289,10 +339,10 @@ print(classification_report(y_ts_m1, y_Vcl_pred))
  ##ROC score
 cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=42)
 scores_Vclf = cross_val_score(Vclf, X, y, scoring="roc_auc_ovo", cv=cv, n_jobs=1)
-print("roc_ovo Voting Classifier with SMOTE: %.3f" % np.mean(scores_Vclf))
+print("roc_ovo Voting Classifier: %.3f" % np.mean(scores_Vclf))
  ##savings
 savings = savings_investigation_score(y_ts_m1, y_Vcl_pred)
-print("savings voting Classifier with SMOTE: ")
+print("savings voting Classifier: ")
 print(savings)
 
 #Evaluating voting classifier with SMOTE
